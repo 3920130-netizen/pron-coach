@@ -15,10 +15,20 @@ const saveSettings = () => store.set('settings', settings);
 let progress = store.get('progress', {});            // { 'YYYY-MM-DD': { 0: {best, tries, passed}, ... } }
 const saveProgress = () => store.set('progress', progress);
 let spoken = store.get('spoken', {});                // { 'YYYY-MM-DD': 그날 따라 말한 횟수 }
-const SPOKEN_GOAL = 30;
+const goals = Object.assign({ spoken: 30, pass: 3, score: 85, days: 5, motto: '' }, store.get('goals', {}));
+const saveGoals = () => store.set('goals', goals);
+let log = store.get('log', []);                      // 채점 기록 [{t, d, ld, i, s, p, w:[틀린 단어]}] / 단어 연습은 k:'w'
+function addLog(e) {
+  log.push(e);
+  const cut = Date.now() - 90 * 864e5;
+  if (log.length > 4000 || log[0].t < cut) log = log.filter(x => x.t >= cut).slice(-4000);
+  store.set('log', log);
+}
+let cleared = store.get('cleared', {});              // { 단어: 단어 연습 통과 시각 }
+const WEAK_SCORE = 90;                               // 최근 점수가 이 아래면 약점 문장
 function renderSpokenPill(bump) {
   const p = document.querySelector('#spPill'), n = spoken[todayStr()] || 0;
-  p.textContent = `🗣️ 오늘 ${n}번`;
+  p.textContent = `🗣️ 오늘 ${n}/${goals.spoken}`;
   if (bump) { p.classList.remove('bump'); void p.offsetWidth; p.classList.add('bump'); }
 }
 
@@ -35,7 +45,9 @@ let lessons = loadLessons();
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const todayStr = () => ymd(new Date());
+const addDays = (s, n) => { const d = new Date(s + 'T00:00'); d.setDate(d.getDate() + n); return ymd(d); };
 const fmtDate = s => { const d = new Date(s + 'T00:00'); return `${d.getMonth() + 1}/${d.getDate()} (${'일월화수목금토'[d.getDay()]})`; };
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('on'), 2200); }
 
@@ -343,9 +355,11 @@ function scoreBrowser(en, alts) {
   });
   const { al, a } = best;
   // 첫 후보가 아닌 걸로 맞았으면 인식기가 "헷갈렸다"는 뜻 → 감점
-  const wordPct = best.ok / exp.length * 100;
-  const conf = a.conf > 0 ? a.conf : 0.75;
-  let score = Math.round(wordPct * 0.8 + conf * 100 * 0.2 - (best.k > 0 ? 6 : 0) - al.ins.length * 3);
+  // 단어가 다 맞아도 인식기 확신도가 아주 높아야 90점대 후반 (확신도 0.95 → 약 94점, 0.8 → 약 81점)
+  const wordPart = Math.pow(best.ok / exp.length, 1.5) * 100;
+  const conf = a.conf > 0 ? a.conf : 0.9;
+  const confPart = Math.pow(Math.max(0, Math.min(1, (conf - 0.5) / 0.5)), 2) * 100;
+  let score = Math.round(wordPart * 0.7 + confPart * 0.3 - (best.k > 0 ? 8 : 0) - al.ins.length * 4);
   score = Math.max(0, Math.min(100, score));
   const marks = al.res.map(x => x.s === 'ok' ? (conf < 0.6 ? 'y' : 'g') : x.s === 'miss' ? 'miss' : 'r');
   const fb = [], seen = new Set();
@@ -466,6 +480,119 @@ function streak() {
   }
   return s;
 }
+
+// ───────── 기록 집계: 하루 / 약점 / 주간 ─────────
+const sentenceOf = (ld, i) => { const l = lessons.find(x => x.date === ld); return l && l.sentences[+i]; };
+function dayStats(d) {
+  const best = {};
+  log.forEach(e => {
+    if (e.d !== d || e.k) return;
+    const b = best[e.ld + ':' + e.i] = best[e.ld + ':' + e.i] || { s: 0, p: false };
+    b.s = Math.max(b.s, e.s); b.p = b.p || e.p;
+  });
+  const v = Object.values(best), sp = spoken[d] || 0;
+  const passed = v.filter(x => x.p).length;
+  const avg = v.length ? Math.round(v.reduce((a, x) => a + x.s, 0) / v.length) : null;   // 그날 문장별 최고점의 평균
+  const met = { spoken: sp >= goals.spoken, pass: passed >= goals.pass, score: avg != null && avg >= goals.score };
+  return { spoken: sp, passed, avg, met, metN: Object.values(met).filter(Boolean).length, studied: sp > 0 || v.length > 0 };
+}
+function weakItems() {
+  const from = addDays(todayStr(), -6), sent = {}, words = {};
+  log.forEach(e => {
+    if (e.d < from || e.k) return;
+    const key = e.ld + ':' + e.i;
+    const x = sent[key] = sent[key] || { ld: e.ld, i: e.i, best: 0, tries: 0, last: 0 };
+    x.best = Math.max(x.best, e.s); x.tries++; x.last = e.s;
+    (e.w || []).forEach(w => {
+      if (FUNC.has(w) || (cleared[w] && cleared[w] > e.t)) return;
+      const y = words[w] = words[w] || { w, n: 0 };
+      y.n++; y.ld = e.ld; y.i = e.i;
+    });
+  });
+  return {
+    sentences: Object.values(sent).filter(x => x.last < WEAK_SCORE).map(x => Object.assign(x, { s: sentenceOf(x.ld, x.i) })).filter(x => x.s).sort((a, b) => a.last - b.last),
+    words: Object.values(words).sort((a, b) => b.n - a.n).slice(0, 15).map(y => Object.assign(y, { s: sentenceOf(y.ld, y.i) }))
+  };
+}
+function startReview(kind) {
+  const wk = weakItems();
+  const sentences = kind === 'words'
+    ? wk.words.slice(0, 10).map(y => ({ en: y.w, ko: y.s ? '예문: ' + y.s.en : '', word: true }))
+    : wk.sentences.slice(0, 10).map(x => ({ en: x.s.en, ko: x.s.ko, ld: x.ld, i: x.i }));
+  if (!sentences.length) return toast('연습할 게 없어요 👍');
+  S.lesson = { date: todayStr(), review: kind, sentences }; S.prog = {}; S.idx = 0;
+  show('study'); renderCard();
+}
+function renderWeak() {
+  const wk = weakItems();
+  $('#weakSent').innerHTML = wk.sentences.map(x => `<div class="wk"><div class="wk-en" data-say="${esc(x.s.en)}">🔊 ${esc(x.s.en)}</div><div class="muted">${fmtDate(x.ld)} 문장 · 최근 <b class="sc">${x.last}점</b> · 최고 ${x.best}점 · ${x.tries}번 시도</div></div>`).join('')
+    || '<div class="muted">최근 일주일 동안 약한 문장이 없어요 👍<br>점수가 90점 아래로 끝난 문장이 여기에 모여요.</div>';
+  $('#weakWords').innerHTML = wk.words.map(y => `<button class="chip" data-say="${esc(y.w)}"><b>${esc(y.w)}</b> ×${y.n}</button>`).join('')
+    || '<div class="muted">자주 틀린 단어가 없어요 👍<br>채점에서 빨간색으로 나온 단어가 여기에 모여요.</div>';
+  $('#btnWeakSent').disabled = !wk.sentences.length; $('#btnWeakWords').disabled = !wk.words.length;
+  $('#btnWeakSent').textContent = `▶ 약한 문장 연습 (${Math.min(10, wk.sentences.length)}개)`;
+  $('#btnWeakWords').textContent = `▶ 단어 연습 (${Math.min(10, wk.words.length)}개)`;
+}
+
+const W = { off: 0 };
+function weekStart(off) { const d = new Date(); d.setDate(d.getDate() - (d.getDay() + 6) % 7 + off * 7); return ymd(d); }
+function weekSummary(start) {
+  const days = [...Array(7)].map((_, k) => { const d = addDays(start, k); return Object.assign({ d }, dayStats(d)); });
+  const avgs = days.filter(x => x.avg != null).map(x => x.avg);
+  return {
+    days, studied: days.filter(x => x.studied).length,
+    spoken: days.reduce((a, x) => a + x.spoken, 0), passed: days.reduce((a, x) => a + x.passed, 0),
+    avg: avgs.length ? Math.round(avgs.reduce((a, x) => a + x, 0) / avgs.length) : null
+  };
+}
+const diffHTML = (a, b) => a == null || b == null || a === b ? '' : `<span class="diff ${a > b ? 'up' : 'down'}">${a > b ? '▲' : '▼'}${Math.abs(a - b)}</span>`;
+function renderWeek() {
+  const start = weekStart(W.off), end = addDays(start, 6), t = todayStr();
+  const cur = weekSummary(start), prev = weekSummary(addDays(start, -7));
+  $('#wkTitle').textContent = `${fmtDate(start)} ~ ${fmtDate(end)}` + (W.off === 0 ? ' · 이번 주' : W.off === -1 ? ' · 지난주' : '');
+  $('#wkNext').disabled = W.off >= 0;
+  $('#wkSum').innerHTML = [
+    ['📅 공부한 날', `${cur.studied}<small>/${goals.days}일</small>`, diffHTML(cur.studied, prev.studied)],
+    ['🗣️ 말하기', `${cur.spoken}<small>번</small>`, diffHTML(cur.spoken, prev.spoken)],
+    ['✅ 통과 문장', `${cur.passed}<small>개</small>`, diffHTML(cur.passed, prev.passed)],
+    ['⭐ 평균 점수', cur.avg == null ? '–' : `${cur.avg}<small>점</small>`, diffHTML(cur.avg, prev.avg)]
+  ].map(([k, v, d]) => `<div><span class="muted">${k}</span><b>${v}</b>${d ? d + '<span class="muted" style="font-size:12px"> 지난주보다</span>' : ''}</div>`).join('');
+  const max = Math.max(goals.spoken, ...cur.days.map(x => x.spoken)) || 1, H = 110;
+  $('#wkChart').innerHTML = `<div class="goal" style="bottom:${goals.spoken / max * H}px"><span>목표 ${goals.spoken}</span></div>` + cur.days.map(x =>
+    `<div class="col"><span class="v">${x.spoken || ''}</span><i class="bar${x.met.spoken ? ' met' : ''}${x.d === t ? ' today' : ''}" style="height:${Math.max(3, x.spoken / max * H)}px"></i></div>`).join('');
+  $('#wkLabels').innerHTML = cur.days.map(x => `<span class="${x.d === t ? 'today' : ''}">${'월화수목금토일'[(new Date(x.d + 'T00:00').getDay() + 6) % 7]}</span>`).join('');
+  $('#wkTable').innerHTML = '<div class="wrow head"><span>날짜</span><span>말하기</span><span>통과</span><span>평균</span><span>목표</span></div>' + cur.days.map(x => x.d > t
+    ? `<div class="wrow future"><span>${fmtDate(x.d)}</span><span>–</span><span>–</span><span>–</span><span></span></div>`
+    : `<div class="wrow${x.d === t ? ' today' : ''}"><span>${fmtDate(x.d)}</span><span>${x.spoken}</span><span>${x.passed}</span><span>${x.avg ?? '–'}</span><span>${x.studied ? (x.metN === 3 ? '🏆' : x.metN + '/3') : '😴'}</span></div>`).join('');
+  // 이번 주에 많이 틀린 단어
+  const words = {};
+  log.forEach(e => { if (e.d >= start && e.d <= end && !e.k) (e.w || []).forEach(w => { if (!FUNC.has(w)) words[w] = (words[w] || 0) + 1; }); });
+  const top = Object.entries(words).sort((a, b) => b[1] - a[1]).slice(0, 6);
+  $('#wkWords').innerHTML = top.map(([w, n]) => `<button class="chip" data-say="${esc(w)}"><b>${esc(w)}</b> ×${n}</button>`).join('') || '<span class="muted">없어요 👍</span>';
+  const left = goals.days - cur.studied;
+  $('#wkMsg').textContent = left <= 0 ? `🏆 이번 주 목표(${goals.days}일) 달성! 정말 잘했어요`
+    : W.off < 0 ? `목표 ${goals.days}일 중 ${cur.studied}일 공부했어요`
+    : `이번 주 목표까지 ${left}일 남았어요. 오늘도 3문장 해볼까요?`;
+}
+
+const GOAL_DEF = [
+  ['spoken', '🗣️ 하루 말하기', '번', 5, 200, 5, '따라 말하기 버튼을 누른 횟수'],
+  ['pass', '✅ 하루 통과 문장', '문장', 1, 9, 1, 'PASS 받은 서로 다른 문장 수'],
+  ['score', '⭐ 하루 평균 점수', '점', 60, 100, 5, '그날 연습한 문장들의 최고점 평균'],
+  ['days', '📅 일주일 공부', '일', 1, 7, 1, '월~일 중 공부한 날 수']
+];
+function renderGoals() {
+  $('#motto').value = goals.motto;
+  $('#goalRows').innerHTML = GOAL_DEF.map(([k, lab, unit, , , , note]) => `<div class="goal-row"><div class="lab">${lab}<div class="muted" style="font-size:12px;font-weight:400">${note}</div></div>
+    <button class="step" data-gstep="${k}" data-d="-1" aria-label="줄이기">−</button><span class="val"><b>${goals[k]}</b>${unit}</span><button class="step" data-gstep="${k}" data-d="1" aria-label="늘리기">+</button></div>`).join('');
+  const t = todayStr(), ds = dayStats(t), wk = weekSummary(weekStart(0));
+  const bar = (lab, v, g, unit) => { const pct = v == null ? 0 : Math.min(100, v / g * 100); return `<div class="gprog"><div class="gl"><span>${lab}</span><b class="${pct >= 100 ? 'ok' : ''}">${v ?? '–'} / ${g}${unit}${pct >= 100 ? ' ✔' : ''}</b></div><div class="spbar"><i style="width:${pct}%"></i></div></div>`; };
+  $('#goalToday').innerHTML = bar('🗣️ 말하기', ds.spoken, goals.spoken, '번') + bar('✅ 통과 문장', ds.passed, goals.pass, '문장') + bar('⭐ 평균 점수', ds.avg, goals.score, '점') + bar('📅 이번 주 공부', wk.studied, goals.days, '일');
+  $('#goalTodayMsg').textContent = ds.metN === 3 ? '🏆 오늘 목표 3개 모두 달성!' : `오늘 목표 ${ds.metN}/3개 달성`;
+  $('#goalStrip').innerHTML = [...Array(14)].map((_, k) => { const d = addDays(t, k - 13), x = dayStats(d);
+    return `<div class="${x.metN === 3 ? 'full' : x.studied ? 'some' : ''}${d === t ? ' today' : ''}"><span>${fmtDate(d).replace(/ \(.\)/, '')}</span><b>${x.metN === 3 ? '🏆' : x.studied ? '●'.repeat(x.metN) + '○'.repeat(3 - x.metN) : '·'}</b></div>`; }).join('');
+}
+
 function renderHome() {
   const t = todayStr();
   let cur = lessons.find(l => l.date === t);
@@ -491,11 +618,15 @@ function renderHome() {
   $('#stDays').textContent = lessons.filter(l => dayStatus(l.date).done).length;
   $('#stSent').textContent = Object.values(progress).reduce((a, p) => a + Object.values(p).filter(x => x.passed).length, 0);
   $('#stSpoken').textContent = Object.values(spoken).reduce((a, n) => a + n, 0);
-  const n = spoken[t] || 0;
+  const n = spoken[t] || 0, ds = dayStats(t);
   $('#spCount').textContent = n;
-  $('#spGoal').textContent = `/ 목표 ${SPOKEN_GOAL}번`;
-  $('#spBar').style.width = Math.min(100, n / SPOKEN_GOAL * 100) + '%';
-  $('#spMsg').textContent = n >= SPOKEN_GOAL ? '🔥 오늘 목표 달성! 입이 트이고 있어요' : n ? `목표까지 ${SPOKEN_GOAL - n}번 남았어요` : '문장을 따라 말할 때마다 1번씩 올라가요';
+  $('#spGoal').textContent = `/ 목표 ${goals.spoken}번`;
+  $('#spBar').style.width = Math.min(100, n / goals.spoken * 100) + '%';
+  $('#spMsg').textContent = n >= goals.spoken ? '🔥 말하기 목표 달성! 입이 트이고 있어요' : n ? `목표까지 ${goals.spoken - n}번 남았어요` : '문장을 따라 말할 때마다 1번씩 올라가요';
+  $('#goalMini').innerHTML = `<span class="${ds.met.pass ? 'met' : ''}">✅ 통과 ${ds.passed}/${goals.pass}문장</span><span class="${ds.met.score ? 'met' : ''}">⭐ 평균 ${ds.avg ?? '–'}/${goals.score}점</span>` + (ds.metN === 3 ? '<span class="met">🏆 오늘 목표 모두 달성</span>' : '');
+  $('#mottoLine').textContent = goals.motto ? `“${goals.motto}”` : '';
+  const wk = weakItems(), wn = wk.sentences.length + wk.words.length;
+  $('#weakN').textContent = wn ? wn : '';
   const warn = [];
   if (/SamsungBrowser/.test(navigator.userAgent)) warn.push(`삼성 인터넷에서는 발음 채점이 안 돼요. <a href="${chromeIntent()}">여기를 눌러 Chrome으로 열기</a>`);
   else if (/KAKAOTALK/i.test(navigator.userAgent)) warn.push(`카톡 안에서는 발음 채점이 안 돼요. <a href="kakaotalk://web/openExternal?url=${encodeURIComponent(location.href)}">여기를 눌러 Chrome/Safari로 열기</a>`);
@@ -505,9 +636,12 @@ function renderHome() {
 }
 
 // ───────── 화면: 학습 ─────────
-const S = { lesson: null, idx: 0, mode: 'en', busy: false, last: null };
+const S = { lesson: null, idx: 0, mode: 'en', busy: false, last: null, prog: null };
+// 지금 학습의 진행 기록 (약점·단어 연습은 저장하지 않는 임시 기록)
+const lp = create => S.lesson.review ? S.prog : create ? (progress[S.lesson.date] = progress[S.lesson.date] || {}) : (progress[S.lesson.date] || {});
 function startLesson(date, from) {
   S.lesson = lessons.find(l => l.date === date); if (!S.lesson) return;
+  S.prog = null;
   const p = progress[date] || {};
   S.idx = from ?? Math.max(0, S.lesson.sentences.findIndex((_, i) => !p[i]?.passed));
   if (S.idx < 0 || from === undefined && dayStatus(date).done) S.idx = 0;
@@ -515,9 +649,9 @@ function startLesson(date, from) {
 }
 function renderCard() {
   const L = S.lesson, s = L.sentences[S.idx];
-  $('#studyTitle').textContent = `${fmtDate(L.date)} · ${S.idx + 1}/${L.sentences.length}`;
+  $('#studyTitle').textContent = `${L.review ? (L.review === 'words' ? '단어 연습' : '약점 연습') : fmtDate(L.date)} · ${S.idx + 1}/${L.sentences.length}`;
   renderSpokenPill();
-  const p = progress[L.date] || {};
+  const p = lp();
   $('#dots').innerHTML = L.sentences.map((_, i) => `<i class="${p[i]?.passed ? 'done' : i === S.idx ? 'cur' : ''}"></i>`).join('');
   $('#studyBody').style.display = ''; $('#doneCard').style.display = 'none';
   $$('#modes button').forEach(b => b.classList.toggle('on', b.dataset.mode === S.mode));
@@ -582,11 +716,22 @@ async function doAttempt() {
 
 function showResult(s, r, pa) {
   const L = S.lesson, pass = r.score >= settings.pass;
-  const p = progress[L.date] = progress[L.date] || {};
+  const p = lp(true);
   const e = p[S.idx] = p[S.idx] || { best: 0, tries: 0, passed: false };
   e.tries++; e.best = Math.max(e.best, r.score); if (pass) e.passed = true;
-  saveProgress();
-  if (r.heard) { const t = todayStr(); spoken[t] = (spoken[t] || 0) + 1; store.set('spoken', spoken); renderSpokenPill(true); }
+  if (!L.review) saveProgress();
+  if (r.heard) {
+    const t = todayStr(), now = Date.now();
+    spoken[t] = (spoken[t] || 0) + 1; store.set('spoken', spoken); renderSpokenPill(true);
+    if (s.word) {
+      if (pass) { cleared[norm(s.en)] = now; store.set('cleared', cleared); }
+      addLog({ t: now, d: t, k: 'w', s: r.score, p: pass, word: norm(s.en) });
+    } else {
+      const exp = tokenize(s.en).map(norm).filter(Boolean);
+      const w = [...new Set(exp.filter((_, k) => r.marks[k] === 'r' || r.marks[k] === 'miss'))];
+      addLog({ t: now, d: t, ld: s.ld ?? L.date, i: s.i ?? S.idx, s: r.score, p: pass, w });
+    }
+  }
   const col = pass ? 'var(--ok)' : r.score >= settings.pass - 15 ? 'var(--warn)' : 'var(--bad)';
   $('#ring').style.background = `conic-gradient(${col} ${r.score * 3.6}deg, var(--line) 0)`;
   $('#ring').innerHTML = `<span style="background:var(--card);width:70px;height:70px;border-radius:50%;display:grid;place-items:center">${r.score}</span>`;
@@ -606,13 +751,15 @@ function showResult(s, r, pa) {
   $('#result').scrollIntoView({ behavior: 'smooth', block: 'start' });
   renderDotsOnly();
 }
-function renderDotsOnly() { const p = progress[S.lesson.date] || {}; $('#dots').innerHTML = S.lesson.sentences.map((_, i) => `<i class="${p[i]?.passed ? 'done' : i === S.idx ? 'cur' : ''}"></i>`).join(''); }
+function renderDotsOnly() { const p = lp(); $('#dots').innerHTML = S.lesson.sentences.map((_, i) => `<i class="${p[i]?.passed ? 'done' : i === S.idx ? 'cur' : ''}"></i>`).join(''); }
 function playMine() { return new Promise(res => { if (!rec.url) return res(); const a = new Audio(rec.url); a.onended = a.onerror = res; a.play().catch(res); }); }
 function next() {
   if (S.idx < S.lesson.sentences.length - 1) { S.idx++; renderCard(); window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
   $('#studyBody').style.display = 'none'; $('#doneCard').style.display = '';
-  const p = progress[S.lesson.date] || {};
-  $('#doneSub').textContent = S.lesson.sentences.map((x, i) => `${i + 1}번 최고 ${p[i]?.best ?? 0}점`).join(' · ');
+  const p = lp(), L = S.lesson;
+  $('#doneTitle').textContent = L.review ? `${L.review === 'words' ? '단어' : '약점'} 연습 ${L.sentences.length}개 완료!` : `오늘의 ${L.sentences.length}문장 완료!`;
+  $('#doneSub').textContent = L.sentences.map((x, i) => `${L.review === 'words' ? x.en : i + 1 + '번'} 최고 ${p[i]?.best ?? 0}점`).join(' · ');
+  $('#btnAgain').textContent = L.review ? '처음부터 다시' : '처음부터 복습';
 }
 
 // ───────── 선생님 메뉴 ─────────
@@ -678,12 +825,22 @@ function show(id) {
   if (id === 'home') renderHome();
   if (id === 'settings') renderSettings();
   if (id === 'teacher') { edRenderList(); edLoad(todayStr()); }
+  if (id === 'weak') renderWeak();
+  if (id === 'week') { W.off = 0; renderWeek(); }
+  if (id === 'goals') renderGoals();
+  $('#tabbar').classList.toggle('off', !['home', 'weak', 'week', 'goals'].includes(id));
+  $$('#tabbar button').forEach(b => b.classList.toggle('on', b.dataset.go === id));
   window.scrollTo(0, 0);
 }
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-go],[data-start],[data-mode],[data-tip],[data-engine],[data-theme],[data-ed],.w');
+  const t = e.target.closest('[data-go],[data-start],[data-mode],[data-tip],[data-engine],[data-theme],[data-ed],[data-say],[data-gstep],.w');
   if (!t) return;
   if (t.dataset.go) return show(t.dataset.go);
+  if (t.dataset.say) return speak(t.dataset.say, 0.85);
+  if (t.dataset.gstep) {
+    const [k, , , min, max, step] = GOAL_DEF.find(g => g[0] === t.dataset.gstep);
+    goals[k] = Math.max(min, Math.min(max, goals[k] + step * +t.dataset.d)); saveGoals(); return renderGoals();
+  }
   if (t.dataset.start) return startLesson(t.dataset.start);
   if (t.dataset.mode) { S.mode = t.dataset.mode; return renderCard(); }
   if (t.dataset.tip != null) { const p = $('#chips')._pts[+t.dataset.tip], tb = $('#tipbox'); tb.innerHTML = `<b>${esc(p.title)}</b> — ${esc(p.tip)}`; tb.classList.add('on'); return; }
@@ -702,7 +859,12 @@ $('#btnSlow').onclick = () => speak(S.lesson.sentences[S.idx].en, 0.7);
 $('#btnMic').onclick = doAttempt;
 $('#btnRetry').onclick = () => { $('#result').classList.remove('on'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 $('#btnNext').onclick = next;
-$('#btnAgain').onclick = () => startLesson(S.lesson.date, 0);
+$('#btnAgain').onclick = () => { if (S.lesson.review) { S.prog = {}; S.idx = 0; renderCard(); } else startLesson(S.lesson.date, 0); };
+$('#btnWeakSent').onclick = () => startReview('sentences');
+$('#btnWeakWords').onclick = () => startReview('words');
+$('#wkPrev').onclick = () => { W.off--; renderWeek(); };
+$('#wkNext').onclick = () => { if (W.off < 0) { W.off++; renderWeek(); } };
+$('#motto').onchange = e => { goals.motto = e.target.value.trim(); saveGoals(); toast('다짐을 저장했어요'); };
 $('#btnMine').onclick = playMine;
 $('#btnCompare').onclick = async () => { await speak(S.lesson.sentences[S.idx].en, 1); await new Promise(r => setTimeout(r, 300)); await playMine(); };
 $('#azKey').onchange = e => { settings.azKey = e.target.value.trim(); saveSettings(); };
@@ -710,7 +872,7 @@ $('#azRegion').onchange = e => { settings.azRegion = e.target.value.trim(); save
 $('#azVoice').onchange = e => { settings.azVoice = e.target.value; saveSettings(); };
 $('#bVoice').onchange = e => { settings.bVoice = e.target.value; saveSettings(); };
 $('#passScore').oninput = e => { settings.pass = +e.target.value; $('#passVal').textContent = settings.pass; saveSettings(); };
-$('#btnReset').onclick = () => { if (confirm('이 기기의 학습 기록을 모두 지울까요?')) { progress = {}; saveProgress(); spoken = {}; store.set('spoken', spoken); toast('초기화했어요'); } };
+$('#btnReset').onclick = () => { if (confirm('이 기기의 학습 기록을 모두 지울까요?')) { progress = {}; saveProgress(); spoken = {}; store.set('spoken', spoken); log = []; store.set('log', log); cleared = {}; store.set('cleared', cleared); toast('초기화했어요'); } };
 $('#edDate').onchange = e => edLoad(e.target.value);
 $('#edSave').onclick = edSave;
 $('#edDelete').onclick = () => {
