@@ -313,12 +313,22 @@ function wordTip(exp, got) {
   return tips;
 }
 
+function browserName() {
+  const u = navigator.userAgent;
+  const b = /KAKAOTALK/i.test(u) ? '카톡 내부' : /SamsungBrowser/.test(u) ? '삼성 인터넷' : /EdgA?\//.test(u) ? 'Edge' : /; wv\)/.test(u) ? '앱 내부(WebView)' : /Chrome\//.test(u) ? 'Chrome' : /Safari/.test(u) ? 'Safari' : '기타';
+  const v = (u.match(/(?:Chrome|SamsungBrowser|Version)\/(\d+)/) || [])[1] || '';
+  return `${b} ${v}`.trim();
+}
 function recognizeBrowser(onInterim, track) {
   return new Promise((resolve, reject) => {
     if (!SR) return reject(new Error('이 브라우저는 음성인식을 지원하지 않아요. Chrome이나 Edge를 사용해 주세요.'));
     const r = new SR();
     r.lang = 'en-US'; r.interimResults = true; r.maxAlternatives = 5; r.continuous = false;
     let finalAlts = null, lastInterim = '';
+    const ev = recognizeBrowser.events = [];
+    ['start', 'audiostart', 'soundstart', 'speechstart', 'speechend', 'nomatch', 'end'].forEach(n => r.addEventListener(n, () => ev.push(n)));
+    r.addEventListener('result', () => ev.push('result'));
+    r.addEventListener('error', e => ev.push('error:' + e.error));
     r.onresult = ev => {
       const res = ev.results[ev.results.length - 1];
       if (res.isFinal) finalAlts = [...res].map(a => ({ text: a.transcript, conf: a.confidence }));
@@ -450,6 +460,8 @@ function prosodyFeedback(en, pa) {
   return fb;
 }
 
+const chromeIntent = () => `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end`;
+
 // ───────── 화면: 홈 ─────────
 function dayStatus(date) {
   const p = progress[date] || {}, l = lessons.find(x => x.date === date);
@@ -492,7 +504,8 @@ function renderHome() {
   $('#stDays').textContent = lessons.filter(l => dayStatus(l.date).done).length;
   $('#stSent').textContent = Object.values(progress).reduce((a, p) => a + Object.values(p).filter(x => x.passed).length, 0);
   const warn = [];
-  if (/KAKAOTALK/i.test(navigator.userAgent)) warn.push(`카톡 안에서는 발음 채점이 안 돼요. <a href="kakaotalk://web/openExternal?url=${encodeURIComponent(location.href)}">여기를 눌러 Chrome/Safari로 열기</a>`);
+  if (/SamsungBrowser/.test(navigator.userAgent)) warn.push(`삼성 인터넷에서는 발음 채점이 안 돼요. <a href="${chromeIntent()}">여기를 눌러 Chrome으로 열기</a>`);
+  else if (/KAKAOTALK/i.test(navigator.userAgent)) warn.push(`카톡 안에서는 발음 채점이 안 돼요. <a href="kakaotalk://web/openExternal?url=${encodeURIComponent(location.href)}">여기를 눌러 Chrome/Safari로 열기</a>`);
   else if (!SR && settings.engine === 'browser') warn.push('이 브라우저는 음성인식이 안 돼요. Chrome 또는 Edge로 열어 주세요.');
   if (location.protocol === 'file:') warn.push('파일로 직접 열면 마이크가 막힐 수 있어요. "실행.bat"으로 열어 주세요.');
   $('#envWarn').innerHTML = warn.join('<br>'); $('#envWarn').classList.toggle('on', warn.length > 0);
@@ -560,6 +573,7 @@ async function doAttempt() {
         return;
       }
       r = scoreBrowser(s.en, alts);
+      if (!alts.length) r.fb.push({ c: 'warn', t: '진단 정보 (선생님께 캡처해 보내 주세요)', d: `${browserName()} · ${solo ? '채점우선' : '동시녹음'} · 녹음된 목소리 ${rec.track.filter(p => p.f).length} · 채점기: ${(recognizeBrowser.events || []).join('>') || '없음'}` });
     }
     const pa = analyzePitch(rec.track);
     r.fb = r.fb.concat(prosodyFeedback(s.en, pa));
