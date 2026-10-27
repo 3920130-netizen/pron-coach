@@ -256,26 +256,6 @@ function analyzePitch(track) {
   return { pts: sm, range, dir, delta, voicedDur };
 }
 
-function drawPitch(pa, into) {
-  const cv = $('#pitch'), g = cv.getContext('2d'), W = cv.width, H = cv.height;
-  const css = getComputedStyle(document.documentElement);
-  g.clearRect(0, 0, W, H);
-  g.strokeStyle = css.getPropertyValue('--line'); g.lineWidth = 2;
-  g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
-  if (!pa) { g.fillStyle = css.getPropertyValue('--sub'); g.font = '28px sans-serif'; g.fillText('목소리 높낮이를 충분히 잡지 못했어요', 30, H / 2 - 14); return; }
-  const t0 = pa.pts[0].t, t1 = pa.pts[pa.pts.length - 1].t || 1;
-  const X = t => 20 + (t - t0) / (t1 - t0 || 1) * (W - 120), Y = s => H / 2 - s * (H / 2 - 16) / 8;
-  // 기대 억양 가이드 (끝부분)
-  g.strokeStyle = css.getPropertyValue('--ok'); g.setLineDash([10, 8]); g.lineWidth = 4;
-  const ex = W - 90, rise = into === 'rise';
-  g.beginPath(); g.moveTo(ex - 140, H / 2); g.lineTo(ex + 60, rise ? 30 : H - 30); g.stroke(); g.setLineDash([]);
-  // 내 억양
-  g.strokeStyle = css.getPropertyValue('--brand'); g.lineWidth = 6; g.lineCap = 'round';
-  g.beginPath(); let prev = null;
-  pa.pts.forEach(p => { const x = X(p.t), y = Y(p.s); if (prev && p.t - prev.t < 0.12) g.lineTo(x, y); else g.moveTo(x, y); prev = p; });
-  g.stroke();
-}
-
 // ───────── 채점: 기본(브라우저 음성인식) ─────────
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 function align(exp, got) {
@@ -554,7 +534,7 @@ async function doAttempt() {
   $('#live').textContent = '';
   try {
     // 일부 폰(안드로이드 등)은 음성인식과 녹음이 마이크를 동시에 못 씀 → 그런 기기는 음성인식만 사용
-    const solo = !useAzure() && store.get('micSolo', false);
+    const solo = !useAzure() && store.get('micSolo', /Android/i.test(navigator.userAgent));
     if (solo) { rec.track = []; if (rec.url) { URL.revokeObjectURL(rec.url); rec.url = null; } }
     else try { await startCapture(); } catch { throw new Error('마이크를 사용할 수 없어요. 브라우저 마이크 권한을 확인해 주세요.'); }
     let r;
@@ -577,7 +557,6 @@ async function doAttempt() {
     }
     const pa = analyzePitch(rec.track);
     r.fb = r.fb.concat(prosodyFeedback(s.en, pa));
-    if (solo) r.fb.push({ c: 'warn', t: '억양 그래프는 꺼져 있어요', d: '이 폰은 채점과 녹음을 동시에 못 해서 발음 채점만 해요. 억양은 화살표(↗↘)와 굵은 강세 단어를 보고 따라 해 주세요.' });
     showResult(s, r, pa);
   } catch (e) {
     await stopCapture().catch(() => {});
@@ -605,10 +584,7 @@ function showResult(s, r, pa) {
   const heard = r.heard ? `<li><b>들린 문장</b>“${esc(r.heard)}”</li>` : '';
   const fb = r.fb.length ? r.fb : [{ c: 'good', t: '완벽해요!', d: '원어민 발음과 거의 같아요.' }];
   $('#fb').innerHTML = heard + fb.slice(0, 7).map(f => `<li class="${f.c}"><b>${esc(f.t)}</b>${esc(f.d)}</li>`).join('');
-  const into = expectedIntonation(s.en);
-  drawPitch(pa, into);
-  $('#pitchLegend').innerHTML = `<span style="color:var(--brand)">━ 내 목소리 높낮이</span> &nbsp; <span style="color:var(--ok)">┅ 끝 억양 목표 (${into === 'rise' ? '↗ 올리기' : '↘ 내리기'})</span>`;
-  $('#btnMine').disabled = !rec.url; $('#btnCompare').disabled = !rec.url;
+  $('#playRow').style.display = rec.url ? '' : 'none';
   $('#btnNext').textContent = S.idx < L.sentences.length - 1 ? '다음 문장 →' : '완료 →';
   $('#btnNext').disabled = !pass && e.tries < 3;
   $('#result').classList.add('on');
@@ -719,7 +695,6 @@ $('#azRegion').onchange = e => { settings.azRegion = e.target.value.trim(); save
 $('#azVoice').onchange = e => { settings.azVoice = e.target.value; saveSettings(); };
 $('#bVoice').onchange = e => { settings.bVoice = e.target.value; saveSettings(); };
 $('#passScore').oninput = e => { settings.pass = +e.target.value; $('#passVal').textContent = settings.pass; saveSettings(); };
-$('#btnSolo').onclick = () => { store.set('micSolo', false); toast('다음 시도부터 녹음·억양 그래프를 다시 써요'); };
 $('#btnReset').onclick = () => { if (confirm('이 기기의 학습 기록을 모두 지울까요?')) { progress = {}; saveProgress(); toast('초기화했어요'); } };
 $('#edDate').onchange = e => edLoad(e.target.value);
 $('#edSave').onclick = edSave;
