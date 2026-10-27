@@ -313,7 +313,7 @@ function wordTip(exp, got) {
   return tips;
 }
 
-function recognizeBrowser(onInterim) {
+function recognizeBrowser(onInterim, track) {
   return new Promise((resolve, reject) => {
     if (!SR) return reject(new Error('이 브라우저는 음성인식을 지원하지 않아요. Chrome이나 Edge를 사용해 주세요.'));
     const r = new SR();
@@ -326,7 +326,8 @@ function recognizeBrowser(onInterim) {
     };
     r.onerror = ev => { if (ev.error === 'no-speech') resolve([]); else if (ev.error !== 'aborted') reject(new Error(ev.error === 'not-allowed' ? '마이크 권한을 허용해 주세요.' : '음성인식 오류: ' + ev.error)); };
     r.onend = () => resolve(finalAlts || (lastInterim ? [{ text: lastInterim, conf: 0 }] : []));
-    r.start();
+    // 최신 Chrome은 녹음 중인 마이크 트랙을 채점기에 같이 넘길 수 있음 (지원 안 하면 인자 무시)
+    try { track ? r.start(track) : r.start(); } catch { r.start(); }
     recognizeBrowser.stop = () => { try { r.stop(); } catch {} };
   });
 }
@@ -539,18 +540,30 @@ async function doAttempt() {
   const mic = $('#btnMic'); mic.classList.add('rec'); mic.textContent = '⏺ 듣고 있어요… (다 말하면 자동 종료)';
   $('#live').textContent = '';
   try {
-    try { await startCapture(); } catch { throw new Error('마이크를 사용할 수 없어요. 브라우저 마이크 권한을 확인해 주세요.'); }
+    // 일부 폰(안드로이드 등)은 음성인식과 녹음이 마이크를 동시에 못 씀 → 그런 기기는 음성인식만 사용
+    const solo = !useAzure() && store.get('micSolo', false);
+    if (solo) { rec.track = []; if (rec.url) { URL.revokeObjectURL(rec.url); rec.url = null; } }
+    else try { await startCapture(); } catch { throw new Error('마이크를 사용할 수 없어요. 브라우저 마이크 권한을 확인해 주세요.'); }
     let r;
     if (useAzure()) {
       $('#live').textContent = '말해 보세요 — 정밀 채점 중';
       const out = await recognizeAzure(s.en);
       await stopCapture(); r = scoreAzure(s.en, out);
     } else {
-      const alts = await recognizeBrowser(t => $('#live').textContent = '“' + t + '”');
-      await new Promise(z => setTimeout(z, 250)); await stopCapture(); r = scoreBrowser(s.en, alts);
+      const track = solo ? null : rec.stream.getAudioTracks()[0];
+      const alts = await recognizeBrowser(t => $('#live').textContent = '“' + t + '”', track);
+      if (!solo) { await new Promise(z => setTimeout(z, 250)); await stopCapture(); }
+      if (!solo && !alts.length && rec.track.filter(p => p.f).length >= 10) {
+        store.set('micSolo', true);
+        $('#live').textContent = '이 기기에 맞게 설정을 바꿨어요. 한 번만 다시 말해 주세요 🙏';
+        toast('목소리는 녹음됐는데 채점기가 못 들었어요 → 채점 우선 모드로 전환');
+        return;
+      }
+      r = scoreBrowser(s.en, alts);
     }
     const pa = analyzePitch(rec.track);
     r.fb = r.fb.concat(prosodyFeedback(s.en, pa));
+    if (solo) r.fb.push({ c: 'warn', t: '억양 그래프는 꺼져 있어요', d: '이 폰은 채점과 녹음을 동시에 못 해서 발음 채점만 해요. 억양은 화살표(↗↘)와 굵은 강세 단어를 보고 따라 해 주세요.' });
     showResult(s, r, pa);
   } catch (e) {
     await stopCapture().catch(() => {});
@@ -692,6 +705,7 @@ $('#azRegion').onchange = e => { settings.azRegion = e.target.value.trim(); save
 $('#azVoice').onchange = e => { settings.azVoice = e.target.value; saveSettings(); };
 $('#bVoice').onchange = e => { settings.bVoice = e.target.value; saveSettings(); };
 $('#passScore').oninput = e => { settings.pass = +e.target.value; $('#passVal').textContent = settings.pass; saveSettings(); };
+$('#btnSolo').onclick = () => { store.set('micSolo', false); toast('다음 시도부터 녹음·억양 그래프를 다시 써요'); };
 $('#btnReset').onclick = () => { if (confirm('이 기기의 학습 기록을 모두 지울까요?')) { progress = {}; saveProgress(); toast('초기화했어요'); } };
 $('#edDate').onchange = e => edLoad(e.target.value);
 $('#edSave').onclick = edSave;
