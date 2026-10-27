@@ -2,6 +2,24 @@
 // 날짜는 카톡 자동발송 예약 순서와 같습니다 (평일, 쉬는날.txt 제외).
 window.LESSONS = [
  {
+  "date": "2026-10-26",
+  "card": 187,
+  "sentences": [
+   {
+    "en": "He passed away.",
+    "ko": "그는 세상을 떠났어."
+   },
+   {
+    "en": "Pull yourself together.",
+    "ko": "정신 차려."
+   },
+   {
+    "en": "I'm in trouble.",
+    "ko": "나 큰일 났어."
+   }
+  ]
+ },
+ {
   "date": "2026-10-27",
   "card": 188,
   "sentences": [
