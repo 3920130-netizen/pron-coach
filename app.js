@@ -14,6 +14,13 @@ const settings = Object.assign(
 const saveSettings = () => store.set('settings', settings);
 let progress = store.get('progress', {});            // { 'YYYY-MM-DD': { 0: {best, tries, passed}, ... } }
 const saveProgress = () => store.set('progress', progress);
+let spoken = store.get('spoken', {});                // { 'YYYY-MM-DD': 그날 따라 말한 횟수 }
+const SPOKEN_GOAL = 30;
+function renderSpokenPill(bump) {
+  const p = document.querySelector('#spPill'), n = spoken[todayStr()] || 0;
+  p.textContent = `🗣️ 오늘 ${n}번`;
+  if (bump) { p.classList.remove('bump'); void p.offsetWidth; p.classList.add('bump'); }
+}
 
 // lessons.js(배포본) + 이 기기에서 선생님이 수정한 것
 function loadLessons() {
@@ -483,6 +490,12 @@ function renderHome() {
   $('#stStreak').textContent = streak();
   $('#stDays').textContent = lessons.filter(l => dayStatus(l.date).done).length;
   $('#stSent').textContent = Object.values(progress).reduce((a, p) => a + Object.values(p).filter(x => x.passed).length, 0);
+  $('#stSpoken').textContent = Object.values(spoken).reduce((a, n) => a + n, 0);
+  const n = spoken[t] || 0;
+  $('#spCount').textContent = n;
+  $('#spGoal').textContent = `/ 목표 ${SPOKEN_GOAL}번`;
+  $('#spBar').style.width = Math.min(100, n / SPOKEN_GOAL * 100) + '%';
+  $('#spMsg').textContent = n >= SPOKEN_GOAL ? '🔥 오늘 목표 달성! 입이 트이고 있어요' : n ? `목표까지 ${SPOKEN_GOAL - n}번 남았어요` : '문장을 따라 말할 때마다 1번씩 올라가요';
   const warn = [];
   if (/SamsungBrowser/.test(navigator.userAgent)) warn.push(`삼성 인터넷에서는 발음 채점이 안 돼요. <a href="${chromeIntent()}">여기를 눌러 Chrome으로 열기</a>`);
   else if (/KAKAOTALK/i.test(navigator.userAgent)) warn.push(`카톡 안에서는 발음 채점이 안 돼요. <a href="kakaotalk://web/openExternal?url=${encodeURIComponent(location.href)}">여기를 눌러 Chrome/Safari로 열기</a>`);
@@ -503,6 +516,7 @@ function startLesson(date, from) {
 function renderCard() {
   const L = S.lesson, s = L.sentences[S.idx];
   $('#studyTitle').textContent = `${fmtDate(L.date)} · ${S.idx + 1}/${L.sentences.length}`;
+  renderSpokenPill();
   const p = progress[L.date] || {};
   $('#dots').innerHTML = L.sentences.map((_, i) => `<i class="${p[i]?.passed ? 'done' : i === S.idx ? 'cur' : ''}"></i>`).join('');
   $('#studyBody').style.display = ''; $('#doneCard').style.display = 'none';
@@ -572,6 +586,7 @@ function showResult(s, r, pa) {
   const e = p[S.idx] = p[S.idx] || { best: 0, tries: 0, passed: false };
   e.tries++; e.best = Math.max(e.best, r.score); if (pass) e.passed = true;
   saveProgress();
+  if (r.heard) { const t = todayStr(); spoken[t] = (spoken[t] || 0) + 1; store.set('spoken', spoken); renderSpokenPill(true); }
   const col = pass ? 'var(--ok)' : r.score >= settings.pass - 15 ? 'var(--warn)' : 'var(--bad)';
   $('#ring').style.background = `conic-gradient(${col} ${r.score * 3.6}deg, var(--line) 0)`;
   $('#ring').innerHTML = `<span style="background:var(--card);width:70px;height:70px;border-radius:50%;display:grid;place-items:center">${r.score}</span>`;
@@ -695,7 +710,7 @@ $('#azRegion').onchange = e => { settings.azRegion = e.target.value.trim(); save
 $('#azVoice').onchange = e => { settings.azVoice = e.target.value; saveSettings(); };
 $('#bVoice').onchange = e => { settings.bVoice = e.target.value; saveSettings(); };
 $('#passScore').oninput = e => { settings.pass = +e.target.value; $('#passVal').textContent = settings.pass; saveSettings(); };
-$('#btnReset').onclick = () => { if (confirm('이 기기의 학습 기록을 모두 지울까요?')) { progress = {}; saveProgress(); toast('초기화했어요'); } };
+$('#btnReset').onclick = () => { if (confirm('이 기기의 학습 기록을 모두 지울까요?')) { progress = {}; saveProgress(); spoken = {}; store.set('spoken', spoken); toast('초기화했어요'); } };
 $('#edDate').onchange = e => edLoad(e.target.value);
 $('#edSave').onclick = edSave;
 $('#edDelete').onclick = () => {
