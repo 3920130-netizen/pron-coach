@@ -6,9 +6,14 @@
 <title>발음코치</title>
 <script>
 // 카톡 안 브라우저는 음성인식이 안 돼서 → 휴대폰 기본 브라우저(Chrome/Safari)로 자동으로 다시 엽니다
-if (/KAKAOTALK/i.test(navigator.userAgent) && location.protocol.startsWith('http')) {
-  location.href = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(location.href);
-}
+// 안드로이드는 Chrome을 직접 지정 (삼성폰 기본 브라우저인 '삼성 인터넷'은 음성인식이 안 됨)
+(function () {
+  var u = navigator.userAgent, https = location.protocol === 'https:';
+  var chrome = 'intent://' + location.host + location.pathname + '#Intent;scheme=https;package=com.android.chrome;end';
+  if (!https) return;
+  if (/KAKAOTALK/i.test(u)) location.href = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(location.href);
+  else if (/Android/i.test(u) && /SamsungBrowser/.test(u)) location.href = chrome;
+})();
 </script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
